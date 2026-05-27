@@ -1,0 +1,25 @@
+# === Click Insight AI — Autenticacao ===
+# Este arquivo controla quem tem acesso a aplicacao.
+# IMPORTANTE: a senha aqui esta em formato hash (bcrypt). Para adicionar/trocar
+# usuarios, use o script gerar_hash.py: python gerar_hash.py
+#
+# Em producao no Render, este arquivo precisa ser commitado (e fica acessivel
+# apenas via login). Como contem APENAS hashes (nao senhas plain), e seguro versionar.
+# Senhas reais nunca aparecem aqui.
+
+credentials:
+  usernames:
+    gleiberson:
+      email: gleiberson@clickdigital.com.br
+      name: Gleiberson
+      password: $2b$12$YTtq8MPin.f7Bak3HpUTcuwclg.sb.zeoEM.CiZF8i4LhWMMrGZHO
+      roles: [admin]
+
+cookie:
+  expiry_days: 7
+  # name e key sao injetados via env var STREAMLIT_AUTH_COOKIE_KEY
+  name: click_insight_auth
+  key: PLACEHOLDER_substituido_em_runtime
+
+pre-authorized:
+  emails: []

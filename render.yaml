@@ -1,0 +1,38 @@
+# === Render Blueprint para Click Insight AI ===
+# Documentacao: https://render.com/docs/blueprint-spec
+#
+# Para usar:
+#   1. Faca push deste repo no GitHub (privado)
+#   2. No Render: New + → Blueprint → conecte o repo
+#   3. Render le este arquivo e provisiona o servico
+#   4. Configure as Environment Variables no painel (NAO commite segredos aqui)
+services:
+  - type: web
+    name: click-insight-ai
+    runtime: python
+    region: oregon          # ou virginia / frankfurt
+    plan: starter           # US$ 7/mes, sem hibernacao
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: streamlit run integracao.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=true
+    healthCheckPath: /
+    autoDeploy: true         # deploy automatico em push para a branch principal
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: STREAMLIT_SERVER_HEADLESS
+        value: "true"
+      # === Segredos abaixo: configurar no painel do Render, NAO neste arquivo ===
+      - key: HUBSPOT_TOKEN
+        sync: false
+      - key: ZENDESK_SUBDOMAIN
+        sync: false
+      - key: ZENDESK_EMAIL
+        sync: false
+      - key: ZENDESK_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        sync: false
+      - key: STREAMLIT_AUTH_COOKIE_KEY
+        sync: false

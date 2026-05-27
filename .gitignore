@@ -1,0 +1,61 @@
+# === Segredos ===
+.env
+.env.local
+.env.production
+*.key
+*.pem
+
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# === Virtualenv ===
+venv/
+.venv/
+env/
+ENV/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === Streamlit ===
+.streamlit/secrets.toml
+
+# === SO ===
+.DS_Store
+Thumbs.db
+
+# === Output local ===
+*.log
+
+# === Arquivos antigos com segredos hardcoded ===
+bkp/
+*.bak.py
+*.bak
+atualizar_equipe.py
+integracao - Copia.py
+*Copia*.py
