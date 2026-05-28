@@ -98,6 +98,11 @@ PLANOS_GESTAOCLICK = {
     "BRONZE":  {"min_ticket":  79, "label": "Bronze",  "badge": "badge-gray"},
 }
 
+# Catalogo ClickNotas: hoje vende apenas um plano unico.
+PLANOS_CLICKNOTAS = {
+    "ESSENCIAL": {"label": "Essencial", "badge": "badge-yellow"},
+}
+
 CATEGORIAS_TICKETS = {
     "Fiscal/NF": ["nota", "nfe", "nfse", "nfc", "fiscal", "imposto", "icms", "csosn", "csc", "certificado", "danfe", "sefaz"],
     "Financeiro/Boleto": ["boleto", "cobranca", "pagamento", "receber", "pagar", "conta corrente", "conciliac", "remessa", "retorno", "pix", "cartao", "fluxo de caixa"],
@@ -546,7 +551,15 @@ def definir_responsavel_acao(properties, ltv, produto):
     }
 
 
-def inferir_plano(ticket_mensal):
+def inferir_plano(ticket_mensal, produto="GESTAOCLICK", is_cliente=False):
+    """Infere o plano. Para ClickNotas, retorna Essencial (catalogo de plano unico).
+    Para GestaoClick, infere pela faixa de ticket mensal."""
+    if produto == "CLICKNOTAS":
+        if is_cliente or ticket_mensal > 0:
+            info = PLANOS_CLICKNOTAS["ESSENCIAL"]
+            return {"chave": "ESSENCIAL", "label": info["label"], "badge": info["badge"]}
+        return {"chave": None, "label": "Sem plano ativo", "badge": "badge-gray"}
+    # GestaoClick (default)
     if ticket_mensal >= PLANOS_GESTAOCLICK["PLATINA"]["min_ticket"]:
         chave = "PLATINA"
     elif ticket_mensal >= PLANOS_GESTAOCLICK["OURO"]["min_ticket"]:
@@ -561,7 +574,7 @@ def inferir_plano(ticket_mensal):
     return {"chave": chave, "label": info["label"], "badge": info["badge"]}
 
 
-def calcular_ltv(properties):
+def calcular_ltv(properties, produto="GESTAOCLICK"):
     """Calcula LTV com heuristica anti-distorcao de pagamento anual antecipado.
 
     Se o cliente paga anuidade (ex: Platina Anual R$ 5170), dividir o
@@ -589,7 +602,9 @@ def calcular_ltv(properties):
     ltv_12m = ticket_mensal * 12
     ltv_24m = ticket_mensal * 24
     ltv_36m = ticket_mensal * 36
-    plano = inferir_plano(ticket_mensal)
+    lifecycle_tmp = (properties.get("lifecyclestage") or "").lower()
+    is_cliente_tmp = "customer" in lifecycle_tmp or "cliente" in lifecycle_tmp
+    plano = inferir_plano(ticket_mensal, produto=produto, is_cliente=is_cliente_tmp)
     lifecycle = (properties.get("lifecyclestage") or "").lower()
     is_cliente = "customer" in lifecycle or "cliente" in lifecycle
 
@@ -1002,49 +1017,49 @@ def sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento, produt
                     "descricao": "Operação financeira pesada — Inter resolve cobrança (boletos baratos), Cora cobre conta corrente PJ com extrato em tempo real e geração de DARFs. Os dois juntos cobrem ponta a ponta.",
                     "prioridade": "media"})
 
-    # ====== 6) Marketplaces e e-commerce ======
-    if (has_website and an_tickets["estoque_count"] >= 1) or an_tickets["integracao_count"] >= 1:
+    # ====== 6) Marketplaces e e-commerce (GestaoClick-only) ======
+    if not is_clicknotas and ((has_website and an_tickets["estoque_count"] >= 1) or an_tickets["integracao_count"] >= 1):
         ops.append({"tipo": "INTEGRACAO", "icon": "M",
                     "titulo": "Marketplaces: Mercado Livre, Nuvemshop ou Loja Integrada",
                     "descricao": "Sinais de operação com estoque ou pedido de integração — sincronizar com marketplaces escala vendas sem custo operacional adicional.",
                     "prioridade": "media"})
 
-    # ====== 7) Portal do Cliente (Ouro+) — quando há fricção em cobrança ======
-    if ltv["plano_chave"] in ("OURO", "PLATINA") and an_tickets["financeiro_count"] >= 2:
+    # ====== 7) Portal do Cliente (GestaoClick Ouro+) ======
+    if not is_clicknotas and ltv["plano_chave"] in ("OURO", "PLATINA") and an_tickets["financeiro_count"] >= 2:
         ops.append({"tipo": "PRODUTO", "icon": "P",
                     "titulo": "Ativar Portal do Cliente (segunda via, contratos, NF-e)",
                     "descricao": "Reduz volume de tickets de 'me manda o boleto/nota' — cliente do cliente se serve sozinho. Ganho duplo: experiência + custo de suporte.",
                     "prioridade": "media"})
 
-    # ====== 8) Assinatura Digital nativa (Platina) ======
-    if ltv["plano_chave"] == "PLATINA" and cliente_ativo:
+    # ====== 8) Assinatura Digital nativa (GestaoClick Platina) ======
+    if not is_clicknotas and ltv["plano_chave"] == "PLATINA" and cliente_ativo:
         ops.append({"tipo": "PRODUTO", "icon": "S",
                     "titulo": "Ativar Assinatura Digital nativa (substitui DocuSign/ClickSign)",
                     "descricao": "Cliente Platina ativo — recurso já incluso costuma estar subutilizado. Eliminar SaaS externo de assinatura é ganho operacional rápido e justifica o plano.",
                     "prioridade": "media"})
 
-    # ====== 9) Recorrência / cobrança recorrente ======
-    if an_tickets["financeiro_count"] >= 2 and ltv["plano_chave"] in ("PRATA", "OURO", "PLATINA"):
+    # ====== 9) Recorrência (GestaoClick) ======
+    if not is_clicknotas and an_tickets["financeiro_count"] >= 2 and ltv["plano_chave"] in ("PRATA", "OURO", "PLATINA"):
         ops.append({"tipo": "PRODUTO", "icon": "R",
                     "titulo": "Módulo de Recorrência / Cobrança Recorrente",
                     "descricao": "Cliente já lida bem com cobrança — ativar cobrança recorrente (mensalidade/assinatura) transforma vendas pontuais em receita previsível. Receita expansiva direta.",
                     "prioridade": "media"})
 
-    # ====== 10) Cross-sell vertical: serviços vs varejo ======
-    if any(termo in industry for termo in ("servic", "consultoria", "agencia", "assistencia", "manutenc")):
+    # ====== 10) Cross-sell vertical: serviços vs varejo (GestaoClick) ======
+    if not is_clicknotas and any(termo in industry for termo in ("servic", "consultoria", "agencia", "assistencia", "manutenc")):
         ops.append({"tipo": "PRODUTO", "icon": "OS",
                     "titulo": "Módulo Ordem de Serviço (OS) + Agendamento",
                     "descricao": "Perfil de serviços — OS centraliza atendimentos, equipamentos e checklist técnico. Agendamento online evita ligações e reduz no-show.",
                     "prioridade": "media"})
 
-    if any(termo in industry for termo in ("varejo", "loja", "comercio", "supermerc", "mercad", "vestuario", "calcad")):
+    if not is_clicknotas and any(termo in industry for termo in ("varejo", "loja", "comercio", "supermerc", "mercad", "vestuario", "calcad")):
         ops.append({"tipo": "PRODUTO", "icon": "#",
                     "titulo": "PDV + Frente de Caixa GestãoClick",
                     "descricao": "Perfil de varejo — PDV integrado ao estoque elimina divergência entre venda e inventário. Ganho operacional imediato em qualquer loja física.",
                     "prioridade": "media"})
 
-    # ====== 11) Multi-empresa / Filial (Platina) ======
-    if ltv["plano_chave"] == "PLATINA" and cliente_ativo:
+    # ====== 11) Multi-empresa / Filial (GestaoClick Platina) ======
+    if not is_clicknotas and ltv["plano_chave"] == "PLATINA" and cliente_ativo:
         ops.append({"tipo": "PRODUTO", "icon": "F",
                     "titulo": "Ativar Multi-empresa / Filiais (até 3 CNPJs)",
                     "descricao": "Recurso Platina frequentemente subutilizado — se o cliente tem mais de um CNPJ ou planeja abrir filial, consolidar tudo no mesmo ambiente é vantagem competitiva.",
@@ -1057,22 +1072,22 @@ def sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento, produt
                     "descricao": "Cliente engajado — automatizar lembretes de boleto, NF-e enviada e pós-venda gera retorno mensurável em D+7. Cross-sell rápido de entregar.",
                     "prioridade": "media"})
 
-    # ====== 13) Upgrades de plano ======
-    if ltv["plano_chave"] and ltv["plano_chave"] in UPGRADES_PLANO and ltv["is_cliente"]:
+    # ====== 13) Upgrades de plano (GestaoClick) ======
+    if not is_clicknotas and ltv["plano_chave"] and ltv["plano_chave"] in UPGRADES_PLANO and ltv["is_cliente"]:
         proximo, motivo = UPGRADES_PLANO[ltv["plano_chave"]]
         ops.append({"tipo": "UPGRADE", "icon": "+",
                     "titulo": "Upgrade " + ltv["plano_label"] + " → " + proximo,
                     "descricao": motivo,
                     "prioridade": "alta" if diag_op["nivel"] == "ATIVO_SAUDAVEL" else "media"})
 
-    if an_tickets["fiscal_count"] >= 3 and ltv["plano_chave"] == "BRONZE":
+    if not is_clicknotas and an_tickets["fiscal_count"] >= 3 and ltv["plano_chave"] == "BRONZE":
         ops.append({"tipo": "UPGRADE", "icon": "F",
                     "titulo": "Migrar Bronze → Prata (NF-e ilimitada)",
                     "descricao": "Cliente Bronze com múltiplos tickets fiscais — Prata libera emissão ilimitada de notas e elimina o gargalo. Up-sell com ROI direto.",
                     "prioridade": "alta"})
 
     # ====== 14) Programas educacionais / advocacy ======
-    if segmento["maturidade"] == "BAIXA" and ltv["plano_chave"] in ("BRONZE", None):
+    if not is_clicknotas and segmento["maturidade"] == "BAIXA" and ltv["plano_chave"] in ("BRONZE", None):
         ops.append({"tipo": "MARKETING", "icon": "i",
                     "titulo": "Conteúdo educativo direcionado (e-mail / WhatsApp)",
                     "descricao": "Baixa maturidade digital — onboarding via conteúdo simples (vídeos curtos, checklists) aumenta engajamento e prepara terreno para upsell futuro.",
@@ -1083,6 +1098,18 @@ def sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento, produt
                     "titulo": "Convidar para programa de Advocacy / Case",
                     "descricao": "VIP estável e silencioso — perfil ideal para case de sucesso, depoimento em vídeo ou indicação. Receita indireta + ativo de marketing.",
                     "prioridade": "baixa"})
+
+    # ====== 14.5) Oportunidades ESPECIFICAS para ClickNotas ======
+    if is_clicknotas and ltv["is_cliente"]:
+        ops.append({"tipo": "CROSS_PRODUTO", "icon": ">>",
+                    "titulo": "Cross-sell: migrar/expandir para GestaoClick (ERP completo)",
+                    "descricao": "Cliente ClickNotas ja confia na marca e emite notas com a gente. Apresentar GestaoClick como evolucao natural (estoque, financeiro, OS, PDV) abre receita expansiva muito maior que o plano Essencial atual.",
+                    "prioridade": "media"})
+    if is_clicknotas and an_tickets["fiscal_count"] >= 2:
+        ops.append({"tipo": "AUTOMACAO", "icon": "AI",
+                    "titulo": "Envio automatico de NF por WhatsApp / e-mail",
+                    "descricao": "Cliente emite muitas NFs. Automatizar entrega ao destinatario reduz retrabalho e melhora percepcao de servico.",
+                    "prioridade": "media"})
 
     # ====== 15) Pré-vendas ======
     if is_lead:
@@ -2175,13 +2202,13 @@ if prompt:
             permitir_fallback_nome=not usuario_buscou_email,
         )
     with st.spinner("Calculando inteligência..."):
-        ltv = calcular_ltv(properties)
+        produto = detectar_produto(properties)
+        ltv = calcular_ltv(properties, produto=produto)
         saude = classificar_saude(properties, tickets, ltv)
         timeline = montar_timeline_unificada(properties, tickets)
         an_tickets = analisar_tickets(tickets)
         diag_op = diagnosticar_operacao(properties, tickets, an_tickets, ltv)
         segmento = inferir_segmento(properties)
-        produto = detectar_produto(properties)
         responsavel = definir_responsavel_acao(properties, ltv, produto)
         health = calcular_health_score(ltv, saude, diag_op, an_tickets)
         oportunidades = sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento, produto, responsavel)
