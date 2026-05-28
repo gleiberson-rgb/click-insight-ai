@@ -1797,17 +1797,34 @@ def grafico_pizza_status(agreg):
 
 
 def renderizar_analise(properties, ltv, saude, timeline, tickets, ia,
-                        an_tickets, diag_op, segmento, oportunidades, health):
+                        an_tickets, diag_op, segmento, oportunidades, health,
+                        produto="GESTAOCLICK", responsavel=None):
     nome = ((properties.get("firstname") or "") + " " + (properties.get("lastname") or "")).strip() or "Cliente"
     empresa = properties.get("company") or "Empresa nao informada"
     stage = properties.get("lifecyclestage") or "-"
     stage_label, _ = STAGE_MAP.get(stage.lower(), (stage.title(), "badge-gray"))
 
-    hero_badges = [
-        "<span class='badge badge-light'>" + stage_label + "</span>",
-        "<span class='badge badge-light'>" + ltv["categoria_label"] + "</span>",
-    ]
-    if ltv.get("plano_chave"):
+    # Badge de PRODUTO sempre visivel no topo (cor diferenciada por produto)
+    if produto == "CLICKNOTAS":
+        produto_label = "ClickNotas"
+        produto_cor_bg = "#FEF3C7"
+        produto_cor_tx = "#92400E"
+    else:
+        produto_label = "GestaoClick"
+        produto_cor_bg = "#DBEAFE"
+        produto_cor_tx = "#1E40AF"
+    badge_produto = (
+        "<span style='display:inline-block;padding:5px 12px;border-radius:999px;"
+        "background:" + produto_cor_bg + ";color:" + produto_cor_tx + ";"
+        "font-size:12px;font-weight:700;letter-spacing:0.04em;margin-right:8px;"
+        "margin-bottom:6px;'>Produto: " + produto_label + "</span>"
+    )
+
+    hero_badges = [badge_produto]
+    hero_badges.append("<span class='badge badge-light'>" + stage_label + "</span>")
+    hero_badges.append("<span class='badge badge-light'>" + ltv["categoria_label"] + "</span>")
+    # Plano contratado: SOMENTE quando ja eh cliente (negocio fechado)
+    if ltv["is_cliente"] and ltv.get("plano_chave"):
         hero_badges.append("<span class='badge badge-light'>Plano " + ltv["plano_label"] + "</span>")
     hero_badges.append("<span class='badge badge-light'>" + saude["label"] + "</span>")
     hero_badges.append("<span class='badge badge-light'>" + diag_op["label"] + "</span>")
@@ -2136,6 +2153,8 @@ if st.session_state.ultimo_relatorio:
         rel["properties"], rel["ltv"], rel["saude"], rel["timeline"],
         rel["tickets"], rel["ia"], rel["an_tickets"], rel["diag_op"],
         rel["segmento"], rel["oportunidades"], rel["health"],
+        produto=rel.get("produto", "GESTAOCLICK"),
+        responsavel=rel.get("responsavel"),
     )
 
 prompt = st.chat_input("Cole o e-mail, nome ou link da intranet do cliente...")
