@@ -323,6 +323,9 @@ def buscar_dados_comerciais_hubspot(identificador):
         "hubspot_owner_id", "responsavel_pelo_contato", "link_intranet", "phone", "mobilephone",
         "createdate", "hs_lifecyclestage_customer_date", "closedate",
         "notes_last_contacted", "website", "city", "state", "industry",
+        # Detectar produto: hs_all_assigned_business_unit_ids vem preenchido SOMENTE
+        # para ClickNotas. Vazio = GestaoClick (default da empresa).
+        "hs_all_assigned_business_unit_ids",
     ]
     if "@" in identificador:
         payload = {"filterGroups": [{"filters": [{"propertyName": "email", "operator": "EQ", "value": identificador}]}], "properties": propriedades, "limit": 1}
@@ -472,6 +475,77 @@ def buscar_tickets_suporte_zendesk(email="", nome="", telefone="",
 # ============================================================
 # INTELIGENCIA
 # ============================================================
+# ============================================================
+# PRODUTO E ROTEAMENTO DE ACOES
+# ============================================================
+# A Click Digital opera com produtos distintos que tem ciclos pos-venda diferentes:
+#   - GestaoClick: ERP principal. Carteira de CS atua nos clientes Ouro/Platina.
+#                  Clientes Bronze/Prata sao atendidos pelo Consultor Responsavel.
+#   - ClickNotas: emissor fiscal standalone. NAO tem CS dedicado em momento algum --
+#                 todo ciclo (lead, ativacao, retencao) eh do Consultor Responsavel.
+#   - Leads (qualquer produto): NUNCA acionam CS. Sao tratados por Pre-vendas/Consultor.
+
+def detectar_produto(properties):
+    """Infere o produto a partir das propriedades do HubSpot.
+    Retorna: 'CLICKNOTAS' | 'GESTAOCLICK'.
+
+    REGRA OFICIAL (Click Digital):
+        - Se hs_all_assigned_business_unit_ids estiver PREENCHIDO -> ClickNotas.
+        - Se estiver VAZIO -> GestaoClick (produto principal, default da empresa).
+    """
+    bu = (properties.get("hs_all_assigned_business_unit_ids") or "").strip()
+    if bu and bu.lower() not in ("null", "none", "0"):
+        return "CLICKNOTAS"
+    return "GESTAOCLICK"
+
+
+def definir_responsavel_acao(properties, ltv, produto):
+    """Decide quem deve executar a proxima acao baseado em produto + estagio + plano.
+    Retorna dict: {area, justificativa, evitar_cs}.
+    """
+    is_cliente = ltv["is_cliente"]
+    plano = ltv.get("plano_chave")
+
+    # Regra 1: ClickNotas NUNCA tem CS, em nenhuma fase
+    if produto == "CLICKNOTAS":
+        return {
+            "area": "Consultor Responsavel",
+            "justificativa": "ClickNotas e produto sem CS dedicado. Todo ciclo (lead, ativacao, retencao, expansao) e do consultor responsavel pelo contato.",
+            "evitar_cs": True,
+        }
+
+    # Regra 2: Lead (qualquer produto) NUNCA aciona CS
+    if not is_cliente:
+        return {
+            "area": "Pre-vendas / Consultor",
+            "justificativa": "Lead ainda nao virou cliente. CS so atua apos a venda. Quem deve agir agora e a equipe comercial (pre-vendedor + consultor responsavel).",
+            "evitar_cs": True,
+        }
+
+    # Regra 3: Cliente GestaoClick Ouro/Platina -> CS dedicado
+    if plano in ("OURO", "PLATINA"):
+        return {
+            "area": "Customer Success (CS)",
+            "justificativa": "Cliente " + (plano.title()) + " entra na carteira de CS (alto ticket, atencao dedicada).",
+            "evitar_cs": False,
+        }
+
+    # Regra 4: Cliente GestaoClick Bronze/Prata -> Consultor responsavel
+    if plano in ("BRONZE", "PRATA"):
+        return {
+            "area": "Consultor Responsavel",
+            "justificativa": "Clientes Bronze/Prata sao atendidos pelo consultor responsavel pelo fechamento. CS so atua sob demanda especifica (escalation).",
+            "evitar_cs": True,
+        }
+
+    # Default conservador: consultor
+    return {
+        "area": "Consultor Responsavel",
+        "justificativa": "Sem indicacao clara de plano ou estagio. Consultor responsavel pelo contato e o ponto de contato padrao.",
+        "evitar_cs": True,
+    }
+
+
 def inferir_plano(ticket_mensal):
     if ticket_mensal >= PLANOS_GESTAOCLICK["PLATINA"]["min_ticket"]:
         chave = "PLATINA"
@@ -844,7 +918,7 @@ UPGRADES_PLANO = {
 }
 
 
-def sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento):
+def sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento, produto="GESTAOCLICK", responsavel=None):
     """Gera carteira de oportunidades contextual, priorizando:
        1) Estabilização operacional quando há risco;
        2) Educação/enablement quando há baixa adoção;
@@ -858,30 +932,42 @@ def sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento):
     has_website = bool(properties.get("website"))
     cliente_ativo = ltv["is_cliente"] and diag_op["nivel"] in ("ATIVO_SAUDAVEL", "ESTAVEL")
 
+    # Roteamento: quem deve agir? Bloqueia recomendacoes de CS quando inadequado.
+    evitar_cs = bool(responsavel and responsavel.get("evitar_cs"))
+    area_padrao = (responsavel or {}).get("area", "Consultor Responsavel")
+    is_clicknotas = produto == "CLICKNOTAS"
+    is_lead = not ltv["is_cliente"]
+
     # ====== 1) Retenção / estabilização (vem antes de qualquer venda) ======
     if diag_op["nivel"] in ("RISCO_CANCELAMENTO", "CHURN_SILENCIOSO"):
-        ops.append({"tipo": "RETENCAO", "icon": "!",
-                    "titulo": "Ação de retenção imediata",
-                    "descricao": "Cliente em risco real — acionar CS sênior antes de qualquer ação comercial. Estabilizar primeiro, vender depois.",
-                    "prioridade": "critica"})
+        if evitar_cs:
+            ops.append({"tipo": "RETENCAO", "icon": "!",
+                        "titulo": "Acao de retencao imediata",
+                        "descricao": "Cliente em risco real - acionar " + area_padrao + " imediatamente. Estabilizar primeiro, vender depois.",
+                        "prioridade": "critica"})
+        else:
+            ops.append({"tipo": "RETENCAO", "icon": "!",
+                        "titulo": "Acao de retencao imediata",
+                        "descricao": "Cliente em risco real - acionar CS senior antes de qualquer acao comercial. Estabilizar primeiro, vender depois.",
+                        "prioridade": "critica"})
 
     if diag_op["nivel"] == "DIFICULDADE_TECNICA":
         ops.append({"tipo": "RETENCAO", "icon": "!",
-                    "titulo": "Triagem técnica + War Room interno",
-                    "descricao": "Tickets de bug/performance recorrentes sugerem desgaste. Suporte e Produto devem alinhar root cause antes de qualquer movimento de expansão.",
+                    "titulo": "Triagem tecnica + alinhamento Suporte/Produto",
+                    "descricao": "Tickets de bug/performance recorrentes sugerem desgaste. " + area_padrao + " deve mobilizar Suporte e Produto para alinhar root cause antes de qualquer movimento de expansao.",
                     "prioridade": "critica"})
 
     # ====== 2) Educação / Onboarding / Enablement ======
     if diag_op["nivel"] in ("BAIXA_AUTONOMIA", "ONBOARDING_INTENSO"):
-        ops.append({"tipo": "CS", "icon": "T",
-                    "titulo": "Trilha de treinamento estruturada + Academy GestãoClick",
-                    "descricao": "Alta proporção de tickets de dúvida — capacitação reduz atrito, derruba custo de suporte e abre espaço futuro para upsell.",
+        ops.append({"tipo": "ONBOARDING", "icon": "T",
+                    "titulo": "Trilha de treinamento estruturada + Academy",
+                    "descricao": "Alta proporcao de tickets de duvida - capacitacao reduz atrito, derruba custo de suporte e abre espaco futuro para upsell. Conducao: " + area_padrao + ".",
                     "prioridade": "alta"})
 
-    if diag_op["nivel"] == "BAIXA_AUTONOMIA":
+    if diag_op["nivel"] == "BAIXA_AUTONOMIA" and not is_clicknotas:
         ops.append({"tipo": "IA", "icon": "AI",
-                    "titulo": "Assistente de IA GestãoClick como copiloto operacional",
-                    "descricao": "IA responde dúvidas operacionais in-app em tempo real — reduz tickets básicos e acelera autonomia da equipe do cliente. Cross-sell que substitui custo de suporte por valor percebido.",
+                    "titulo": "Assistente de IA GestaoClick como copiloto operacional",
+                    "descricao": "IA responde duvidas operacionais in-app em tempo real - reduz tickets basicos e acelera autonomia da equipe do cliente. Cross-sell que substitui custo de suporte por valor percebido. Oferta conduzida pelo " + area_padrao + ".",
                     "prioridade": "alta"})
 
     # ====== 3) Assistente de IA (cross-sell transversal — adaptado ao perfil) ======
@@ -999,11 +1085,18 @@ def sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento):
                     "prioridade": "baixa"})
 
     # ====== 15) Pré-vendas ======
-    if not ltv["is_cliente"] and ltv["receita_acumulada"] > 0:
-        ops.append({"tipo": "PRE_VENDAS", "icon": ">",
-                    "titulo": "Avançar lead no funil — proposta comercial",
-                    "descricao": "Lead estratégico com sinal de receita — priorizar abordagem consultiva.",
-                    "prioridade": "alta"})
+    if is_lead:
+        nome_prod = "ClickNotas" if is_clicknotas else "GestaoClick"
+        if ltv["receita_acumulada"] > 0:
+            ops.append({"tipo": "PRE_VENDAS", "icon": ">",
+                        "titulo": "Avancar lead " + nome_prod + " no funil - proposta comercial",
+                        "descricao": "Lead estrategico com sinal de receita - priorizar abordagem consultiva conduzida pelo " + area_padrao + ".",
+                        "prioridade": "alta"})
+        else:
+            ops.append({"tipo": "PRE_VENDAS", "icon": ">",
+                        "titulo": "Engajar lead " + nome_prod + " e validar interesse real",
+                        "descricao": "Lead em estagio inicial sem receita ainda. " + area_padrao + " deve fazer contato leve (WhatsApp/email), mapear dor real e validar fit antes de propor planos.",
+                        "prioridade": "alta"})
 
     ops.sort(key=lambda x: prioridade_ordem.get(x["prioridade"], 9))
     return ops
@@ -1012,7 +1105,8 @@ def sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento):
 # CLAUDE
 # ============================================================
 def gerar_diagnostico_claude(properties, ltv, saude, timeline, tickets,
-                              an_tickets, diag_op, segmento, oportunidades, health):
+                              an_tickets, diag_op, segmento, oportunidades, health,
+                              produto="GESTAOCLICK", responsavel=None):
     if not ANTHROPIC_API_KEY:
         return {"diagnostico": "_Chave Claude nao configurada._",
                 "recomendacao": "_Configure CLAUDE_API_KEY_FIXA no topo do arquivo._",
@@ -1051,7 +1145,17 @@ def gerar_diagnostico_claude(properties, ltv, saude, timeline, tickets,
         "- Localização: " + (properties.get("city") or "-") + "/" + (properties.get("state") or "-") + "\n"
         "- Pré-vendedor (responsável pelo contato inicial): " + (properties.get("responsavel_pelo_contato") or "-") + "\n"
         "- Consultor Responsável: " + (properties.get("hubspot_owner_id") or "-") + "\n"
-        "- IMPORTANTE: ambos os nomes acima são da EQUIPE DE VENDAS. O pós-venda/CS é feito por equipe separada que NÃO está mapeada no CRM. Quando recomendar ações de pós-venda, retenção ou treinamento, direcione para o CS de forma genérica (ex.: 'CS deve fazer check-in...') e NUNCA atribua essas ações nominalmente ao pré-vendedor ou consultor de venda.\n\n"
+        "- IMPORTANTE: ambos os nomes acima são da EQUIPE DE VENDAS. Quando recomendar ações, siga as REGRAS DE ROTEAMENTO logo abaixo - elas dizem quem deve agir em cada caso. Nunca atribua ações de pós-venda nominalmente ao pré-vendedor ou consultor de venda; use o tipo de área (CS / Consultor / Pré-vendas) genericamente.\n\n"
+        "PRODUTO E ROTEAMENTO (CRÍTICO - obedeça sem exceção)\n"
+        "- Produto detectado: " + produto + "\n"
+        "- Área responsável pela próxima ação: " + ((responsavel or {}).get("area", "Consultor Responsável")) + "\n"
+        "- Por quê: " + ((responsavel or {}).get("justificativa", "Padrão.")) + "\n"
+        "REGRAS QUE VOCÊ DEVE OBEDECER:\n"
+        "  1. ClickNotas NÃO TEM CS em momento algum. Todo ciclo é do Consultor Responsável. NÃO recomende ação de CS para ClickNotas, NEM em diagnóstico, NEM em recomendação.\n"
+        "  2. LEAD (qualquer produto, lifecycle != customer) NUNCA tem CS atuando. Pré-vendas e Comercial conduzem. CS só entra depois da venda.\n"
+        "  3. Cliente GestãoClick Bronze/Prata: ação rotineira é do CONSULTOR RESPONSÁVEL. CS só entra em escalation pontual.\n"
+        "  4. Cliente GestãoClick Ouro/Platina: aí sim CS é o ponto de contato natural.\n"
+        "  5. Quando a regra acima disser 'evitar CS', você NÃO PODE escrever 'CS deve...', 'aciono CS...', 'CS faça...'. Use 'consultor responsável', 'pré-vendedor' ou 'time comercial' como sujeito da ação.\n\n"
         "VALOR FINANCEIRO\n"
         "- Receita acumulada: " + ltv["receita_acumulada_fmt"] + "\n"
         "- Meses de relacionamento: " + str(ltv["meses_relacionamento"]) + "\n"
@@ -2058,17 +2162,21 @@ if prompt:
         an_tickets = analisar_tickets(tickets)
         diag_op = diagnosticar_operacao(properties, tickets, an_tickets, ltv)
         segmento = inferir_segmento(properties)
+        produto = detectar_produto(properties)
+        responsavel = definir_responsavel_acao(properties, ltv, produto)
         health = calcular_health_score(ltv, saude, diag_op, an_tickets)
-        oportunidades = sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento)
+        oportunidades = sugerir_oportunidades(properties, ltv, an_tickets, diag_op, segmento, produto, responsavel)
     with st.spinner("Gerando diagnóstico do cliente..."):
         ia = gerar_diagnostico_claude(
             properties, ltv, saude, timeline, tickets,
             an_tickets, diag_op, segmento, oportunidades, health,
+            produto=produto, responsavel=responsavel,
         )
     st.session_state.ultimo_relatorio = {
         "properties": properties, "ltv": ltv, "saude": saude,
         "timeline": timeline, "tickets": tickets, "ia": ia,
         "an_tickets": an_tickets, "diag_op": diag_op,
         "segmento": segmento, "oportunidades": oportunidades, "health": health,
+        "produto": produto, "responsavel": responsavel,
     }
     st.rerun()
