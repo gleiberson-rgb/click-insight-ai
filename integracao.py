@@ -342,17 +342,81 @@ def buscar_dados_comerciais_hubspot(identificador):
         return {"_status": "erro", "Erro HubSpot": str(e)}
 
 
-def buscar_tickets_suporte_zendesk(email="", nome="", telefone=""):
+# Lista de primeiros nomes/sobrenomes muito comuns no Brasil.
+# Se um nome eh composto APENAS por palavras dessa lista, consideramos generico demais
+# para fazer busca por nome no Zendesk (risco alto de falso positivo).
+NOMES_MUITO_COMUNS = {
+    "joao", "joao", "maria", "jose", "ana", "pedro", "paulo", "lucas", "carlos",
+    "antonio", "francisco", "luiz", "luis", "felipe", "bruno", "marcos", "marcio",
+    "thiago", "tiago", "rafael", "diego", "matheus", "gabriel", "rodrigo",
+    "fernando", "ricardo", "andre", "leandro", "vinicius", "daniel", "marcelo",
+    "alexandre", "eduardo", "roberto", "henrique", "guilherme", "vitor", "victor",
+    "julio", "renato", "gustavo", "raphael", "raul", "samuel", "simone", "patricia",
+    "fernanda", "juliana", "amanda", "camila", "carla", "claudia", "cristina",
+    "daniela", "debora", "eliane", "isabela", "isabel", "joana", "leticia",
+    "luciana", "marcia", "mariana", "monica", "natalia", "renata", "sandra",
+    "silvana", "tatiana", "vanessa", "viviane",
+    # sobrenomes muito comuns
+    "silva", "santos", "oliveira", "souza", "sousa", "lima", "pereira", "costa",
+    "rodrigues", "almeida", "nascimento", "carvalho", "gomes", "fernandes",
+    "ribeiro", "ferreira", "barbosa", "cardoso", "rocha", "dias", "monteiro",
+    "mendes", "moreira", "araujo", "barros", "freitas", "martins", "alves",
+    "correia", "correa", "pinto", "moura", "campos", "teixeira", "machado",
+    "andrade", "vieira", "duarte", "castro", "melo", "mello", "ramos",
+}
+
+LIMITE_RESULTADOS_BUSCA_NOME = 8  # Acima disso, descarta como falso positivo provavel
+
+
+def _nome_eh_generico(nome_completo):
+    """True se TODAS as palavras do nome estao na lista de comuns,
+    OU se o nome tem menos de 2 palavras, OU comprimento total < 10 chars."""
+    if not nome_completo:
+        return True
+    partes = nome_completo.strip().split()
+    if len(partes) < 2:
+        return True
+    if len(nome_completo.strip()) < 10:
+        return True
+    todas_comuns = all(normalizar(p) in NOMES_MUITO_COMUNS for p in partes)
+    return todas_comuns
+
+
+def buscar_tickets_suporte_zendesk(email="", nome="", telefone="",
+                                    permitir_fallback_nome=True):
+    """Busca tickets no Zendesk com prioridade: email > telefone > nome.
+
+    Args:
+        email: e-mail do contato (busca mais confiavel).
+        nome: nome completo do contato (usado so como fallback).
+        telefone: telefone do contato (busca confiavel).
+        permitir_fallback_nome: se False, NAO cai para busca por nome quando
+            email/telefone nao retornam nada. Use False quando o usuario buscou
+            por email explicito -- a resposta correta nesse caso eh "zero tickets".
+
+    Cada ticket retornado vem com o campo `match_por` indicando como foi encontrado:
+    'email' | 'telefone' | 'nome'. Quando for 'nome', a UI deve avisar que pode
+    haver falsos positivos.
+    """
     auth = (ZENDESK_EMAIL + "/token", ZENDESK_TOKEN)
     tickets = []
+    metodo_match = None
     base_url = "https://" + ZENDESK_SUBDOMAIN + ".zendesk.com/api/v2/search.json"
+
+    # 1) Por email (autoritativo)
     if email and "@" in email:
         try:
-            r = requests.get(base_url, params={"query": "type:ticket requester:" + email}, auth=auth, timeout=12)
+            r = requests.get(base_url,
+                             params={"query": "type:ticket requester:" + email},
+                             auth=auth, timeout=12)
             if r.status_code == 200:
                 tickets = r.json().get("results", [])
+                if tickets:
+                    metodo_match = "email"
         except Exception:
             pass
+
+    # 2) Por telefone (confiavel se telefone tem ao menos 8 digitos)
     if not tickets and telefone:
         num_limpo = "".join(filter(str.isdigit, telefone))
         if len(num_limpo) >= 8:
@@ -363,18 +427,33 @@ def buscar_tickets_suporte_zendesk(email="", nome="", telefone=""):
             else:
                 query_phone = 'type:ticket "' + num_limpo + '"'
             try:
-                r = requests.get(base_url, params={"query": query_phone}, auth=auth, timeout=12)
+                r = requests.get(base_url, params={"query": query_phone},
+                                 auth=auth, timeout=12)
                 if r.status_code == 200:
                     tickets = r.json().get("results", [])
+                    if tickets:
+                        metodo_match = "telefone"
             except Exception:
                 pass
-    if not tickets and nome and nome.strip():
-        try:
-            r = requests.get(base_url, params={"query": 'type:ticket requester:"' + nome.strip() + '"'}, auth=auth, timeout=12)
-            if r.status_code == 200:
-                tickets = r.json().get("results", [])
-        except Exception:
-            pass
+
+    # 3) Por nome -- APENAS quando permitido E nome eh especifico o suficiente
+    if not tickets and permitir_fallback_nome and nome and nome.strip():
+        nome_limpo = nome.strip()
+        if not _nome_eh_generico(nome_limpo):
+            try:
+                r = requests.get(base_url,
+                                 params={"query": 'type:ticket requester:"' + nome_limpo + '"'},
+                                 auth=auth, timeout=12)
+                if r.status_code == 200:
+                    candidatos = r.json().get("results", [])
+                    # Se a busca por nome trouxe muitos resultados, eh quase certo que
+                    # sao varios homonimos misturados. Descarta -- melhor 0 que 50 errados.
+                    if 0 < len(candidatos) <= LIMITE_RESULTADOS_BUSCA_NOME:
+                        tickets = candidatos
+                        metodo_match = "nome"
+            except Exception:
+                pass
+
     lista = []
     for t in tickets:
         lista.append({
@@ -385,6 +464,7 @@ def buscar_tickets_suporte_zendesk(email="", nome="", telefone=""):
             "criado_em": t.get("created_at"),
             "atualizado_em": t.get("updated_at"),
             "descricao": (t.get("description") or "")[:400],
+            "match_por": metodo_match,
         })
     return lista
 
@@ -1804,6 +1884,15 @@ def renderizar_analise(properties, ltv, saude, timeline, tickets, ia,
             )
         section_close()
 
+        # Aviso quando os tickets vieram de match por NOME (risco de falso positivo)
+        match_por = (tickets[0].get("match_por") if tickets else None)
+        if match_por == "nome":
+            st.warning(
+                "⚠ Tickets encontrados via match por **nome**, não por e-mail ou telefone. "
+                "Pode haver falsos positivos (homônimos). Confirme manualmente cada ticket antes "
+                "de usar como base para decisão."
+            )
+
         section_open("Análise de Suporte — Categorias e Frequência")
         cg1, cg2 = st.columns(2)
         with cg1:
@@ -1954,9 +2043,13 @@ if prompt:
         st.stop()
     with st.spinner("Cruzando tickets no atendimento..."):
         nome_busca = ((properties.get("firstname") or "") + " " + (properties.get("lastname") or "")).strip()
+        # Se o usuario buscou por e-mail especifico no chat, NAO usa nome como fallback
+        # (evita falsos positivos quando o e-mail nao tem ticket no Zendesk).
+        usuario_buscou_email = "@" in (prompt or "")
         tickets = buscar_tickets_suporte_zendesk(
             email=properties.get("email", ""), nome=nome_busca,
             telefone=properties.get("phone") or properties.get("mobilephone") or "",
+            permitir_fallback_nome=not usuario_buscou_email,
         )
     with st.spinner("Calculando inteligência..."):
         ltv = calcular_ltv(properties)
